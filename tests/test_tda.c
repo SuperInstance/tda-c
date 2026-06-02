@@ -475,6 +475,106 @@ static void test_barcodes_empty(void) {
     tda_persistence_diagram_free(pd);
 }
 
+/* ========== Test 26: Persistence - 5 points star topology ========== */
+static void test_persistence_star(void) {
+    /* Hub-spoke: point 0 at center, others at distance 1 from center,
+     * distance 3 between spokes */
+    TDADistanceMatrix *dm = tda_distance_matrix_create(5);
+    for (int i = 0; i < 5; i++) tda_distance_matrix_set(dm, i, i, 0);
+    for (int i = 1; i < 5; i++) {
+        tda_distance_matrix_set(dm, 0, i, 1.0);
+        tda_distance_matrix_set(dm, i, 0, 1.0);
+    }
+    for (int i = 1; i < 5; i++)
+        for (int j = i + 1; j < 5; j++) {
+            tda_distance_matrix_set(dm, i, j, 3.0);
+            tda_distance_matrix_set(dm, j, i, 3.0);
+        }
+
+    TDAPersistenceDiagram *pd = tda_compute_persistence(dm, 1);
+    /* H0: 5 components, 4 die at dist=1 (edges to hub), 1 survives */
+    int h0_count = 0, h0_alive = 0;
+    for (size_t i = 0; i < pd->n_points; i++) {
+        if (pd->points[i].dimension == 0) {
+            h0_count++;
+            if (isinf(pd->points[i].death)) h0_alive++;
+        }
+    }
+    ASSERT(h0_count == 5, "star: 5 H0 points");
+    ASSERT(h0_alive == 1, "star: 1 H0 alive");
+
+    tda_persistence_diagram_free(pd);
+    tda_distance_matrix_free(dm);
+}
+
+/* ========== Test 27: Persistence - zero max_hom_dim ========== */
+static void test_persistence_h0_only(void) {
+    TDADistanceMatrix *dm = tda_distance_matrix_create(3);
+    for (int i = 0; i < 3; i++) tda_distance_matrix_set(dm, i, i, 0);
+    tda_distance_matrix_set(dm, 0, 1, 1.0); tda_distance_matrix_set(dm, 1, 0, 1.0);
+    tda_distance_matrix_set(dm, 0, 2, 2.0); tda_distance_matrix_set(dm, 2, 0, 2.0);
+    tda_distance_matrix_set(dm, 1, 2, 1.5); tda_distance_matrix_set(dm, 2, 1, 1.5);
+
+    TDAPersistenceDiagram *pd = tda_compute_persistence(dm, 0);
+    /* Only H0: 3 points, 2 die, 1 alive */
+    int h0_count = 0, h1_count = 0;
+    for (size_t i = 0; i < pd->n_points; i++) {
+        if (pd->points[i].dimension == 0) h0_count++;
+        if (pd->points[i].dimension == 1) h1_count++;
+    }
+    ASSERT(h0_count == 3, "h0_only: 3 H0 points");
+    ASSERT(h1_count == 0, "h0_only: 0 H1 points");
+
+    tda_persistence_diagram_free(pd);
+    tda_distance_matrix_free(dm);
+}
+
+/* ========== Test 28: Persistence - all same point (degenerate) ========== */
+static void test_persistence_coincident(void) {
+    /* All points at same location: all distances are 0 */
+    TDADistanceMatrix *dm = tda_distance_matrix_create(4);
+    for (int i = 0; i < 4; i++)
+        for (int j = 0; j < 4; j++)
+            tda_distance_matrix_set(dm, i, j, 0.0);
+
+    TDAPersistenceDiagram *pd = tda_compute_persistence(dm, 1);
+    /* All merge instantly at dist=0 */
+    int h0_alive = 0;
+    for (size_t i = 0; i < pd->n_points; i++) {
+        if (pd->points[i].dimension == 0 && isinf(pd->points[i].death))
+            h0_alive++;
+    }
+    ASSERT(h0_alive == 1, "coincident: 1 H0 alive");
+
+    tda_persistence_diagram_free(pd);
+    tda_distance_matrix_free(dm);
+}
+
+/* ========== Test 29: Persistence - empty distance matrix ========== */
+static void test_persistence_empty(void) {
+    TDAPersistenceDiagram *pd = tda_compute_persistence(NULL, 1);
+    ASSERT(pd != NULL, "persistence empty returns non-null");
+    ASSERT(pd->n_points == 0, "empty DM: 0 PD points");
+    tda_persistence_diagram_free(pd);
+}
+
+/* ========== Test 30: Bottleneck distance - one empty, one non-empty ========== */
+static void test_bottleneck_one_empty(void) {
+    TDAPersistenceDiagram *pd1 = calloc(1, sizeof(TDAPersistenceDiagram));
+    pd1->points = NULL; pd1->n_points = 0; pd1->capacity = 0;
+
+    TDAPersistenceDiagram *pd2 = malloc(sizeof(TDAPersistenceDiagram));
+    pd2->n_points = 1; pd2->capacity = 1;
+    pd2->points = malloc(sizeof(TDAPDPoint));
+    pd2->points[0] = (TDAPDPoint){0.0, 2.0, 0};
+
+    double d = tda_bottleneck_distance(pd1, pd2, 0);
+    ASSERT(d > 0.0, "one empty: bottleneck > 0");
+
+    tda_persistence_diagram_free(pd1);
+    tda_persistence_diagram_free(pd2);
+}
+
 int main(void) {
     printf("=== TDA-C Test Suite ===\n\n");
 
@@ -503,6 +603,11 @@ int main(void) {
     test_betti_various_eps();
     test_persistence_line();
     test_barcodes_empty();
+    test_persistence_star();
+    test_persistence_h0_only();
+    test_persistence_coincident();
+    test_persistence_empty();
+    test_bottleneck_one_empty();
 
     printf("\n=== Results: %d passed, %d failed, %d total ===\n",
            tests_passed, tests_failed, tests_passed + tests_failed);

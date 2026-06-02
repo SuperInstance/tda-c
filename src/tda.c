@@ -117,14 +117,18 @@ static void simplex_vec_init(SimplexVec *v) {
     v->cap = 256;
     v->len = 0;
     v->items = malloc(v->cap * sizeof(TDASimplex));
+    if (!v->items) { v->cap = 0; }
 }
 
-static void simplex_vec_push(SimplexVec *v, const TDASimplex *s) {
+static int simplex_vec_push(SimplexVec *v, const TDASimplex *s) {
     if (v->len >= v->cap) {
         v->cap *= 2;
-        v->items = realloc(v->items, v->cap * sizeof(TDASimplex));
+        TDASimplex *new_items = realloc(v->items, v->cap * sizeof(TDASimplex));
+        if (!new_items) return -1;
+        v->items = new_items;
     }
     v->items[v->len++] = *s;
+    return 0;
 }
 
 /* Recursive co-face enumeration */
@@ -291,7 +295,9 @@ static void pd_vec_init(PDVec *v) {
 static void pd_vec_push(PDVec *v, double birth, double death, int dim) {
     if (v->len >= v->cap) {
         v->cap *= 2;
-        v->items = realloc(v->items, v->cap * sizeof(TDAPDPoint));
+        TDAPDPoint *new_items = realloc(v->items, v->cap * sizeof(TDAPDPoint));
+        if (!new_items) return;
+        v->items = new_items;
     }
     v->items[v->len].birth = birth;
     v->items[v->len].death = death;
@@ -304,6 +310,10 @@ static void pd_vec_push(PDVec *v, double birth, double death, int dim) {
 
 TDAPersistenceDiagram *tda_compute_persistence(const TDADistanceMatrix *dm,
                                                  size_t max_hom_dim) {
+    if (!dm) {
+        TDAPersistenceDiagram *pd = calloc(1, sizeof(TDAPersistenceDiagram));
+        return pd;
+    }
     size_t n = dm->n;
     if (n == 0) {
         TDAPersistenceDiagram *pd = calloc(1, sizeof(TDAPersistenceDiagram));
@@ -336,22 +346,17 @@ TDAPersistenceDiagram *tda_compute_persistence(const TDADistanceMatrix *dm,
         int ri = uf_find(uf, (int)edges[e].i);
         int rj = uf_find(uf, (int)edges[e].j);
         if (ri != rj) {
-            /* One component dies at this edge's distance */
-            int dies = (ri > rj) ? ri : rj;
-            int lives = (ri > rj) ? rj : ri;
-            if (root_alive[dies]) {
+            /* Perform union first, then determine which root survived */
+            uf_union(uf, ri, rj);
+            int new_root = uf_find(uf, ri);
+            int dead = (new_root == ri) ? rj : ri;
+
+            if (root_alive[dead]) {
                 pd_vec_push(&vec, 0.0, edges[e].dist, 0);
-                root_alive[dies] = 0;
+                root_alive[dead] = 0;
             }
-            uf_union(uf, (int)edges[e].i, (int)edges[e].j);
-            /* After union, the new root may differ from `lives` */
-            int new_root = uf_find(uf, (int)edges[e].i);
-            if (new_root != lives) {
-                if (root_alive[lives] && !root_alive[new_root]) {
-                    root_alive[new_root] = 1;
-                    root_alive[lives] = 0;
-                }
-            }
+            /* Ensure the surviving root is marked alive */
+            root_alive[new_root] = 1;
         }
     }
 
@@ -400,7 +405,9 @@ TDAPersistenceDiagram *tda_compute_persistence(const TDADistanceMatrix *dm,
                     if (d12 > filt) filt = d12;
                     if (n_tris >= tri_cap) {
                         tri_cap = tri_cap ? tri_cap * 2 : 256;
-                        tris = realloc(tris, tri_cap * sizeof(Tri));
+                        Tri *new_tris = realloc(tris, tri_cap * sizeof(Tri));
+                        if (!new_tris) { free(tris); free(edges); free(root_alive); uf_free(uf); free(vec.items); return NULL; }
+                        tris = new_tris;
                     }
                     tris[n_tris].a = (uint32_t)i;
                     tris[n_tris].b = (uint32_t)j;
@@ -459,22 +466,17 @@ TDAPersistenceDiagram *tda_compute_persistence(const TDADistanceMatrix *dm,
 
         free(tris);
 
-        /* Sort by (filtration, dim) */
-        /* Simple insertion sort since we need stable-ish ordering */
-        for (size_t i = 1; i < sx_count; i++) {
-            SimplexInfo tmp = all_sx[i];
-            size_t j = i;
-            while (j > 0) {
-                int cmp = 0;
-                if (all_sx[j-1].filt > tmp.filt) cmp = 1;
-                else if (all_sx[j-1].filt < tmp.filt) cmp = 0;
-                else if (all_sx[j-1].dim > tmp.dim) cmp = 1;
-                if (!cmp) break;
-                all_sx[j] = all_sx[j-1];
-                j--;
-            }
-            all_sx[j] = tmp;
+        int simplex_info_cmp(const void *a, const void *b) {
+            const SimplexInfo *sa = (const SimplexInfo *)a;
+            const SimplexInfo *sb = (const SimplexInfo *)b;
+            if (sa->filt < sb->filt) return -1;
+            if (sa->filt > sb->filt) return 1;
+            if (sa->dim < sb->dim) return -1;
+            if (sa->dim > sb->dim) return 1;
+            return 0;
         }
+
+        qsort(all_sx, sx_count, sizeof(SimplexInfo), simplex_info_cmp);
 
         /* Map: for each simplex, what's its column index in the boundary matrix? */
         /* Build a lookup: vertex/edge/triangle -> column index */
@@ -741,16 +743,16 @@ double tda_bottleneck_distance(const TDAPersistenceDiagram *pd1,
         if (cost[i] < 1e17) all_costs[n_costs++] = cost[i];
     }
 
-    /* Sort */
-    for (size_t i = 1; i < n_costs; i++) {
-        double tmp = all_costs[i];
-        size_t j = i;
-        while (j > 0 && all_costs[j-1] > tmp) {
-            all_costs[j] = all_costs[j-1];
-            j--;
-        }
-        all_costs[j] = tmp;
+    int double_cmp(const void *a, const void *b) {
+        double da = *(const double *)a;
+        double db = *(const double *)b;
+        if (da < db) return -1;
+        if (da > db) return 1;
+        return 0;
     }
+
+    /* Sort */
+    qsort(all_costs, n_costs, sizeof(double), double_cmp);
 
     /* Remove duplicates */
     size_t unique = 1;
@@ -764,6 +766,8 @@ double tda_bottleneck_distance(const TDAPersistenceDiagram *pd1,
     int *match_l = malloc(m * sizeof(int));
     int *match_r = malloc(m * sizeof(int));
     int *visited = malloc(m * sizeof(int));
+    int *stk = malloc(m * sizeof(int));
+    int *parent = malloc(m * sizeof(int));
 
     /* Binary search for minimum threshold */
     double lo = 0, hi = n_costs > 0 ? all_costs[n_costs - 1] : 0.0;
@@ -779,14 +783,7 @@ double tda_bottleneck_distance(const TDAPersistenceDiagram *pd1,
 
         for (size_t u = 0; u < m && ok; u++) {
             memset(visited, 0, m * sizeof(int));
-            /* Iterative DFS */
-            int *stk = malloc(m * sizeof(int));
-            int *parent = malloc(m * sizeof(int));
-            int sp = 0;
-            /* Try to find augmenting path from u */
-            stk[sp++] = (int)u;
             int found = 0;
-            /* We need a different approach: try each neighbor */
             for (size_t v = 0; v < m && !found; v++) {
                 if (visited[v]) continue;
                 if (cost[u * m + v] > mid) continue;
@@ -796,10 +793,9 @@ double tda_bottleneck_distance(const TDAPersistenceDiagram *pd1,
                     match_r[v] = (int)u;
                     found = 1;
                 } else {
-                    /* Try to augment from match_r[v] */
-                    /* Use a simple stack-based DFS */
+                    /* Try to augment from match_r[v] via DFS */
                     stk[0] = match_r[v];
-                    sp = 1;
+                    int sp = 1;
                     parent[v] = (int)u;
                     int aug_found = 0;
                     while (sp > 0 && !aug_found) {
@@ -831,8 +827,6 @@ double tda_bottleneck_distance(const TDAPersistenceDiagram *pd1,
                 }
             }
             if (!found) ok = 0;
-            free(stk);
-            free(parent);
         }
 
         if (ok) {
@@ -843,6 +837,8 @@ double tda_bottleneck_distance(const TDAPersistenceDiagram *pd1,
         }
     }
 
+    free(stk);
+    free(parent);
     free(match_l);
     free(match_r);
     free(visited);
